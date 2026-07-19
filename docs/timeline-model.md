@@ -8,7 +8,7 @@
 - occurred and ingested timestamps
 - sanitized payload and payload hash
 
-`GET /api/v1/cases/{caseId}/timeline` returns events sorted by `occurredAt` and `ingestedAt`.
+`GET /api/v1/cases/{caseId}/timeline` first discovers the case correlation id from events matching the requested case id, then returns all events in that correlation sorted by `occurredAt` and `ingestedAt`. This keeps the original `loan.application.submitted.v1` event in the timeline even though Loan Service uses `caseId = applicationId` before Governance creates `case-<applicationId>`.
 
 Trace completeness is:
 

@@ -7,5 +7,6 @@ Idempotency:
 - `audit_event.event_id` is the immutable unique event key
 - `inbox_event.event_id` prevents duplicate event storage
 - repeated events increment `inbox_event.duplicate_count`
+- concurrent duplicate insert races are recovered after rollback in a separate transaction
 
 Out-of-order delivery is expected. The service does not rewrite original events. Timeline warnings are computed at query time.

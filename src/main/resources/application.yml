@@ -43,7 +43,7 @@ rippleguard:
     commit: 54ea344a682723d61d9beedf4ade56ee48029c0d
   governance:
     repository: dlsrnjs125/rippleguard-governance-service
-    commit: 29bafba0c7d9909474564204823d2616593e0223
+    commit: 29bafba34c47e003fdefafa455924992993721cf
   kafka:
     enabled: ${AUDIT_KAFKA_ENABLED:true}
     topics:

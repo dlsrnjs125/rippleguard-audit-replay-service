@@ -6,4 +6,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface AuditEventRepository extends JpaRepository<AuditEventEntity, UUID> {
     List<AuditEventEntity> findByCaseIdOrderByOccurredAtAscIngestedAtAsc(String caseId);
+
+    List<AuditEventEntity> findByCorrelationIdOrderByOccurredAtAscIngestedAtAsc(String correlationId);
 }

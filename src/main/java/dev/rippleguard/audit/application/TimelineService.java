@@ -36,7 +36,7 @@ public class TimelineService {
 
     @Transactional(readOnly = true)
     public CaseTimelineResponse timeline(String caseId) {
-        List<AuditEventEntity> events = auditEvents.findByCaseIdOrderByOccurredAtAscIngestedAtAsc(caseId);
+        List<AuditEventEntity> events = eventsForCaseTimeline(caseId);
         if (events.isEmpty()) {
             throw new NotFoundException("No audit timeline found for case: " + caseId);
         }
@@ -77,6 +77,15 @@ public class TimelineService {
                 completeness,
                 warnings.stream().map(Enum::name).toList()
         );
+    }
+
+    private List<AuditEventEntity> eventsForCaseTimeline(String caseId) {
+        List<AuditEventEntity> directlyMatched = auditEvents.findByCaseIdOrderByOccurredAtAscIngestedAtAsc(caseId);
+        if (!directlyMatched.isEmpty()) {
+            String correlationId = directlyMatched.get(0).getCorrelationId();
+            return auditEvents.findByCorrelationIdOrderByOccurredAtAscIngestedAtAsc(correlationId);
+        }
+        return auditEvents.findByCorrelationIdOrderByOccurredAtAscIngestedAtAsc(caseId);
     }
 
     private Set<UUID> invalidReferenceEventIds(List<AuditEventEntity> events) {

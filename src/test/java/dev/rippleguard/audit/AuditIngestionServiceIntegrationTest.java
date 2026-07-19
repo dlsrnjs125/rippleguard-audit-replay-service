@@ -102,9 +102,9 @@ class AuditIngestionServiceIntegrationTest {
     @Test
     void completeCausationChainReturnsCompleteTrace() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000004");
-        String caseId = "case-004";
+        String caseId = "case-" + applicationId;
         UUID runId = UUID.fromString("20000000-0000-4000-8000-000000000004");
-        EventEnvelope submitted = event("loan.application.submitted.v1", applicationId, caseId, null, null,
+        EventEnvelope submitted = event("loan.application.submitted.v1", applicationId, applicationId.toString(), null, null,
                 Instant.parse("2026-01-01T00:00:00Z"));
         EventEnvelope reviewStarted = event("governance.review.started.v1", applicationId, caseId, null, submitted.eventId(),
                 Instant.parse("2026-01-01T00:01:00Z"));
@@ -125,6 +125,17 @@ class AuditIngestionServiceIntegrationTest {
         assertThat(timeline.traceCompleteness()).isEqualTo(TraceCompleteness.COMPLETE);
         assertThat(timeline.warnings()).isEmpty();
         assertThat(timeline.events()).hasSize(6);
+        assertThat(timeline.events()).extracting("eventType")
+                .containsExactly(
+                        "loan.application.submitted.v1",
+                        "governance.review.started.v1",
+                        "agent.evaluation.requested.v1",
+                        "agent.evaluation.completed.v1",
+                        "loan.decision.commanded.v1",
+                        "loan.decision.finalized.v1"
+                );
+        assertThat(timeline.events().get(0).caseId()).isEqualTo(applicationId.toString());
+        assertThat(timeline.caseId()).isEqualTo(caseId);
     }
 
     @Test
@@ -159,17 +170,18 @@ class AuditIngestionServiceIntegrationTest {
                         "applicationId", applicationId.toString(),
                         "financialSnapshot", Map.of("income", 987654321),
                         "documentText", "raw document",
-                        "applicantReference", "applicant-ref"
+                        "applicantId", "applicant-ref"
                 ))
         );
 
         ingestion.ingest(event);
 
         String sanitized = auditEvents.findById(event.eventId()).orElseThrow().getSanitizedPayload();
-        assertThat(sanitized).contains("[REDACTED]");
+        assertThat(sanitized).contains("applicant-ref");
         assertThat(sanitized).doesNotContain("raw document");
         assertThat(sanitized).doesNotContain("987654321");
-        assertThat(sanitized).contains("applicant-ref");
+        assertThat(sanitized).doesNotContain("financialSnapshot");
+        assertThat(sanitized).doesNotContain("documentText");
     }
 
     @Test
@@ -186,12 +198,21 @@ class AuditIngestionServiceIntegrationTest {
                 null,
                 applicationId.toString(),
                 null,
-                objectMapper.valueToTree(Map.of("applicationId", applicationId.toString()))
+                objectMapper.valueToTree(Map.of(
+                        "applicationId", applicationId.toString(),
+                        "incomeHistory", "private-income",
+                        "requestedAmount", "30000000.00",
+                        "apiKey", "secret-key"
+                ))
         );
 
         ingestion.ingest(event);
 
         assertThat(timeline("case-007").warnings()).contains("UNKNOWN_EVENT_VERSION");
+        String sanitized = auditEvents.findById(event.eventId()).orElseThrow().getSanitizedPayload();
+        assertThat(sanitized).contains("\"redacted\":true");
+        assertThat(sanitized).contains("incomeHistory", "requestedAmount", "apiKey");
+        assertThat(sanitized).doesNotContain("private-income", "30000000.00", "secret-key");
     }
 
     private dev.rippleguard.audit.interfaces.rest.CaseTimelineResponse timeline(String caseId) {
