@@ -1,0 +1,4 @@
+.git
+target/**
+!target/
+!target/rippleguard-audit-replay-service-0.0.1-SNAPSHOT.jar

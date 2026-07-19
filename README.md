@@ -1,12 +1,23 @@
 # RippleGuard Audit Replay Service
 
-시스템과 AI 판단의 감사 추적, 재현, 조회 모델을 담당하는 서비스입니다.
+Phase 1 Audit Replay Service stores sanitized Phase 1 events and exposes a minimal case timeline.
 
-## 주요 역할
+## Run
 
-- 요청부터 최종 결정까지의 Trace 수집
-- 과거 판단 과정 Replay
-- 감사·분석용 Read Model 제공
-- 결정 근거와 이벤트 이력 조회
+```bash
+./mvnw test
+./mvnw package
+docker build -t rippleguard-audit-replay-service:local .
+```
 
-업무 상태의 원본은 각 도메인 서비스가 소유하며 이 서비스는 감사와 재현에 집중합니다.
+## API
+
+`GET /api/v1/cases/{caseId}/timeline`
+
+## Baselines
+
+- Contracts: `29f6c348fd93633476438ee36b3f93a3d036e165`
+- Loan Service: `54ea344a682723d61d9beedf4ade56ee48029c0d`
+- Governance Service: `29bafba0c7d9909474564204823d2616593e0223`
+
+Detailed notes are in `docs/`.

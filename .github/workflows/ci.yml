@@ -1,0 +1,21 @@
+name: audit-replay-service-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - phase/1-audit-foundation
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: ./mvnw test
+      - run: ./mvnw package
+      - run: docker build -t rippleguard-audit-replay-service:ci .
