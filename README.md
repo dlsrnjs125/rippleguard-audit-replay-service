@@ -1,6 +1,8 @@
 # RippleGuard Audit Replay Service
 
-Phase 1 Audit Replay Service stores sanitized Phase 1 events and exposes a minimal case timeline.
+시스템과 AI 판단의 감사 추적, 재현, 조회 모델을 담당하는 서비스입니다.
+
+업무 상태의 원본은 각 도메인 서비스가 소유하며 이 서비스는 감사와 재현 가능한 조회 기반을 담당합니다. 현재 구현은 원본 이벤트를 안전하게 수집하고 케이스 타임라인 API를 제공합니다.
 
 ## Run
 
@@ -14,10 +16,6 @@ docker build -t rippleguard-audit-replay-service:local .
 
 `GET /api/v1/cases/{caseId}/timeline`
 
-## Baselines
+## Documentation
 
-- Contracts: `29f6c348fd93633476438ee36b3f93a3d036e165`
-- Loan Service: `54ea344a682723d61d9beedf4ade56ee48029c0d`
-- Governance Service: `29bafba0c7d9909474564204823d2616593e0223`
-
-Detailed notes are in `docs/`.
+Detailed implementation notes are in `docs/`.
