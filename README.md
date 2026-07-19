@@ -2,11 +2,20 @@
 
 시스템과 AI 판단의 감사 추적, 재현, 조회 모델을 담당하는 서비스입니다.
 
-## 주요 역할
+업무 상태의 원본은 각 도메인 서비스가 소유하며 이 서비스는 감사와 재현 가능한 조회 기반을 담당합니다. 현재 구현은 원본 이벤트를 안전하게 수집하고 케이스 타임라인 API를 제공합니다.
 
-- 요청부터 최종 결정까지의 Trace 수집
-- 과거 판단 과정 Replay
-- 감사·분석용 Read Model 제공
-- 결정 근거와 이벤트 이력 조회
+## Run
 
-업무 상태의 원본은 각 도메인 서비스가 소유하며 이 서비스는 감사와 재현에 집중합니다.
+```bash
+./mvnw test
+./mvnw package
+docker build -t rippleguard-audit-replay-service:local .
+```
+
+## API
+
+`GET /api/v1/cases/{caseId}/timeline`
+
+## Documentation
+
+Detailed implementation notes are in `docs/`.
