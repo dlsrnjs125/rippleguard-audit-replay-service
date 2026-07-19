@@ -51,11 +51,24 @@ public class AuditIngestionService {
         ingest(json.eventEnvelope(rawMessage));
     }
 
+    public boolean tryIngestRaw(String rawMessage) {
+        try {
+            ingestRaw(rawMessage);
+            return true;
+        } catch (IllegalArgumentException exception) {
+            log.warn("Malformed audit event quarantined payloadHash={} reason={}",
+                    json.sha256(rawMessage), exception.getMessage());
+            return false;
+        }
+    }
+
     public void ingest(EventEnvelope event) {
         try {
             transactions.executeWithoutResult(status -> ingestInTransaction(event));
         } catch (DataIntegrityViolationException duplicate) {
-            recordDuplicateInNewTransaction(event);
+            if (!recordDuplicateInNewTransaction(event)) {
+                throw duplicate;
+            }
         }
     }
 
@@ -69,9 +82,9 @@ public class AuditIngestionService {
             return;
         }
 
-        boolean unknownVersion = !SUPPORTED_SCHEMA_VERSION.equals(event.schemaVersion())
-                || !PHASE_1_EVENTS.contains(event.eventType());
-        String sanitizedPayload = json.canonicalJson(sanitizer.sanitize(event, payloadHash, unknownVersion));
+        String unsupportedReason = unsupportedReason(event);
+        boolean unknownVersion = unsupportedReason != null;
+        String sanitizedPayload = json.canonicalJson(sanitizer.sanitize(event, payloadHash, unsupportedReason));
         inbox.saveAndFlush(new InboxEventEntity(
                 event.eventId(),
                 event.eventType(),
@@ -97,11 +110,24 @@ public class AuditIngestionService {
         ));
     }
 
-    private void recordDuplicateInNewTransaction(EventEnvelope event) {
-        transactions.executeWithoutResult(status -> inbox.findById(event.eventId()).ifPresent(existing -> {
-            existing.markDuplicate(clock.instant());
-            log.info("Recovered concurrent duplicate audit event eventId={} eventType={}",
-                    event.eventId(), event.eventType());
-        }));
+    private boolean recordDuplicateInNewTransaction(EventEnvelope event) {
+        return Boolean.TRUE.equals(transactions.execute(status -> inbox.findById(event.eventId())
+                .map(existing -> {
+                    existing.markDuplicate(clock.instant());
+                    log.info("Recovered concurrent duplicate audit event eventId={} eventType={}",
+                            event.eventId(), event.eventType());
+                    return true;
+                })
+                .orElse(false)));
+    }
+
+    private String unsupportedReason(EventEnvelope event) {
+        if (!PHASE_1_EVENTS.contains(event.eventType())) {
+            return "UNSUPPORTED_EVENT_TYPE";
+        }
+        if (!SUPPORTED_SCHEMA_VERSION.equals(event.schemaVersion())) {
+            return "UNSUPPORTED_SCHEMA_VERSION";
+        }
+        return null;
     }
 }

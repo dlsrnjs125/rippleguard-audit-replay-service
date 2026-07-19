@@ -91,7 +91,7 @@ class PostgresMigrationIntegrationTest {
                 null,
                 objectMapper.valueToTree(Map.of(
                         "applicationId", applicationId.toString(),
-                        "applicantId", "applicant-ref",
+                        "applicantId", "synthetic:applicant-ref",
                         "inputSnapshotVersion", "snapshot-v1",
                         "submittedAt", "2026-01-01T00:00:00Z",
                         "submissionChannel", "PARTNER_API"

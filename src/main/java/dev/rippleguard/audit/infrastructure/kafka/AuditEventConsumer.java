@@ -27,7 +27,10 @@ public class AuditEventConsumer {
             "${rippleguard.kafka.topics.loan-decision-finalized}"
     })
     public void consume(String rawMessage) {
-        ingestionService.ingestRaw(rawMessage);
-        log.info("Consumed audit event");
+        if (ingestionService.tryIngestRaw(rawMessage)) {
+            log.info("Consumed audit event");
+            return;
+        }
+        log.warn("Quarantined malformed audit event");
     }
 }

@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -36,7 +37,8 @@ public class TimelineService {
 
     @Transactional(readOnly = true)
     public CaseTimelineResponse timeline(String caseId) {
-        List<AuditEventEntity> events = eventsForCaseTimeline(caseId);
+        TimelineQueryResult queryResult = eventsForCaseTimeline(caseId);
+        List<AuditEventEntity> events = queryResult.events();
         if (events.isEmpty()) {
             throw new NotFoundException("No audit timeline found for case: " + caseId);
         }
@@ -48,7 +50,7 @@ public class TimelineService {
             eventIds.add(event.getEventId());
             eventTypes.add(event.getEventType());
             if (event.isUnknownVersion()) {
-                warnings.add(TimelineWarning.UNKNOWN_EVENT_VERSION);
+                warnings.add(TimelineWarning.EVENT_GAP_DETECTED);
             }
             if (event.getCausationId() != null && !eventIds.contains(event.getCausationId())) {
                 warnings.add(TimelineWarning.INVALID_REFERENCE);
@@ -58,6 +60,10 @@ public class TimelineService {
         if (!eventTypes.containsAll(COMPLETE_PATH)) {
             warnings.add(TimelineWarning.EVENT_GAP_DETECTED);
         }
+        if (queryResult.ambiguousCorrelation()) {
+            warnings.add(TimelineWarning.INVALID_REFERENCE);
+            warnings.add(TimelineWarning.EVENT_GAP_DETECTED);
+        }
 
         Set<UUID> invalidReferences = invalidReferenceEventIds(events);
         Set<UUID> lateEvents = lateEventIds(events);
@@ -65,7 +71,7 @@ public class TimelineService {
             warnings.add(TimelineWarning.LATE_EVENT_PENDING);
         }
         List<TimelineEventResponse> responseEvents = events.stream()
-                .map(event -> toResponse(event, invalidReferences, lateEvents))
+                .map(event -> toResponse(caseId, event, invalidReferences, lateEvents, queryResult.ambiguousCorrelation()))
                 .toList();
 
         TraceCompleteness completeness = traceCompleteness(eventTypes, warnings);
@@ -79,13 +85,20 @@ public class TimelineService {
         );
     }
 
-    private List<AuditEventEntity> eventsForCaseTimeline(String caseId) {
+    private TimelineQueryResult eventsForCaseTimeline(String caseId) {
         List<AuditEventEntity> directlyMatched = auditEvents.findByCaseIdOrderByOccurredAtAscIngestedAtAsc(caseId);
         if (!directlyMatched.isEmpty()) {
-            String correlationId = directlyMatched.get(0).getCorrelationId();
-            return auditEvents.findByCorrelationIdOrderByOccurredAtAscIngestedAtAsc(correlationId);
+            Set<String> correlationIds = new LinkedHashSet<>();
+            directlyMatched.forEach(event -> correlationIds.add(event.getCorrelationId()));
+            if (correlationIds.size() > 1) {
+                return new TimelineQueryResult(directlyMatched, true);
+            }
+            return new TimelineQueryResult(
+                    auditEvents.findByCorrelationIdOrderByOccurredAtAscIngestedAtAsc(correlationIds.iterator().next()),
+                    false
+            );
         }
-        return auditEvents.findByCorrelationIdOrderByOccurredAtAscIngestedAtAsc(caseId);
+        return new TimelineQueryResult(auditEvents.findByCorrelationIdOrderByOccurredAtAscIngestedAtAsc(caseId), false);
     }
 
     private Set<UUID> invalidReferenceEventIds(List<AuditEventEntity> events) {
@@ -117,9 +130,11 @@ public class TimelineService {
         return late;
     }
 
-    private TimelineEventResponse toResponse(AuditEventEntity event, Set<UUID> invalidReferences, Set<UUID> lateEvents) {
+    private TimelineEventResponse toResponse(String timelineCaseId, AuditEventEntity event,
+                                             Set<UUID> invalidReferences, Set<UUID> lateEvents,
+                                             boolean ambiguousCorrelation) {
         TimelineEventStatus status = TimelineEventStatus.RECORDED;
-        if (invalidReferences.contains(event.getEventId())) {
+        if (ambiguousCorrelation || invalidReferences.contains(event.getEventId())) {
             status = TimelineEventStatus.INVALID_REFERENCE;
         } else if (lateEvents.contains(event.getEventId())) {
             status = TimelineEventStatus.LATE;
@@ -127,7 +142,7 @@ public class TimelineService {
         return new TimelineEventResponse(
                 event.getEventId(),
                 event.getEventType(),
-                event.getCaseId(),
+                timelineCaseId,
                 event.getOccurredAt(),
                 event.getProducer(),
                 event.getEvaluationRunId(),
@@ -158,5 +173,8 @@ public class TimelineService {
             case "loan.decision.finalized.v1" -> "Loan decision finalized";
             default -> "Unknown Phase 1 event version or type recorded";
         };
+    }
+
+    private record TimelineQueryResult(List<AuditEventEntity> events, boolean ambiguousCorrelation) {
     }
 }

@@ -14,4 +14,8 @@ If the API returns `PARTIAL` with `EVENT_GAP_DETECTED`, one or more expected Pha
 
 ## Unknown Version
 
-Unknown event versions are recorded with `unknown_version=true` and surfaced as `UNKNOWN_EVENT_VERSION` in the timeline warnings.
+Unknown event versions are recorded with `unknown_version=true`. Their payload bodies are redacted, and incomplete timelines surface contract-supported warnings such as `EVENT_GAP_DETECTED`.
+
+## Malformed Event Envelope
+
+Malformed raw JSON or invalid envelope fields are quarantined at the consumer boundary. They are not written to `audit_event` or `inbox_event`; logs include only a payload hash and reason.

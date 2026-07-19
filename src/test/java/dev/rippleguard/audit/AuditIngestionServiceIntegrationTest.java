@@ -1,6 +1,7 @@
 package dev.rippleguard.audit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -12,7 +13,10 @@ import dev.rippleguard.audit.domain.TraceCompleteness;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventRepository;
 import dev.rippleguard.audit.infrastructure.persistence.InboxEventRepository;
 import java.time.Instant;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +25,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 
 @SpringBootTest(properties = {
         "debug=false",
@@ -134,8 +139,42 @@ class AuditIngestionServiceIntegrationTest {
                         "loan.decision.commanded.v1",
                         "loan.decision.finalized.v1"
                 );
-        assertThat(timeline.events().get(0).caseId()).isEqualTo(applicationId.toString());
+        assertThat(timeline.events()).allSatisfy(event -> assertThat(event.caseId()).isEqualTo(caseId));
         assertThat(timeline.caseId()).isEqualTo(caseId);
+        assertCaseTimelineContractSchemaAndSemantics(timeline);
+    }
+
+    @Test
+    void actualApiResponseNormalizesEventCaseIdsAndSatisfiesCaseTimelineContract() throws Exception {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000014");
+        String caseId = "case-" + applicationId;
+        UUID runId = UUID.fromString("20000000-0000-4000-8000-000000000014");
+        EventEnvelope submitted = event("loan.application.submitted.v1", applicationId, applicationId.toString(), null, null,
+                Instant.parse("2026-01-01T00:00:00Z"));
+        EventEnvelope reviewStarted = event("governance.review.started.v1", applicationId, caseId, null, submitted.eventId(),
+                Instant.parse("2026-01-01T00:01:00Z"));
+        EventEnvelope requested = event("agent.evaluation.requested.v1", applicationId, caseId, runId, reviewStarted.eventId(),
+                Instant.parse("2026-01-01T00:02:00Z"));
+        EventEnvelope completed = event("agent.evaluation.completed.v1", applicationId, caseId, runId, requested.eventId(),
+                Instant.parse("2026-01-01T00:03:00Z"));
+        EventEnvelope commanded = event("loan.decision.commanded.v1", applicationId, caseId, runId, completed.eventId(),
+                Instant.parse("2026-01-01T00:04:00Z"));
+        EventEnvelope finalized = event("loan.decision.finalized.v1", applicationId, caseId, runId, commanded.eventId(),
+                Instant.parse("2026-01-01T00:05:00Z"));
+
+        for (EventEnvelope event : new EventEnvelope[]{submitted, reviewStarted, requested, completed, commanded, finalized}) {
+            ingestion.ingest(event);
+        }
+
+        MvcResult result = mvc.perform(get("/api/v1/cases/{caseId}/timeline", caseId))
+                .andExpect(status().isOk())
+                .andReturn();
+        var response = objectMapper.readValue(result.getResponse().getContentAsString(),
+                dev.rippleguard.audit.interfaces.rest.CaseTimelineResponse.class);
+
+        assertThat(response.events()).hasSize(6);
+        assertThat(response.events()).allSatisfy(event -> assertThat(event.caseId()).isEqualTo(caseId));
+        assertCaseTimelineContractSchemaAndSemantics(response);
     }
 
     @Test
@@ -170,18 +209,89 @@ class AuditIngestionServiceIntegrationTest {
                         "applicationId", applicationId.toString(),
                         "financialSnapshot", Map.of("income", 987654321),
                         "documentText", "raw document",
-                        "applicantId", "applicant-ref"
+                        "applicantId", "synthetic:applicant-ref"
                 ))
         );
 
         ingestion.ingest(event);
 
         String sanitized = auditEvents.findById(event.eventId()).orElseThrow().getSanitizedPayload();
-        assertThat(sanitized).contains("applicant-ref");
+        assertThat(sanitized).contains("synthetic:applicant-ref");
         assertThat(sanitized).doesNotContain("raw document");
         assertThat(sanitized).doesNotContain("987654321");
         assertThat(sanitized).doesNotContain("financialSnapshot");
         assertThat(sanitized).doesNotContain("documentText");
+    }
+
+    @Test
+    void invalidApplicantIdReferenceIsRedactedForSupportedSubmittedEvent() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000016");
+        EventEnvelope event = new EventEnvelope(
+                UUID.randomUUID(),
+                "loan.application.submitted.v1",
+                "1.1.0",
+                Instant.parse("2026-01-01T00:00:00Z"),
+                "loan-service",
+                applicationId,
+                "case-016",
+                null,
+                applicationId.toString(),
+                null,
+                objectMapper.valueToTree(Map.of(
+                        "applicationId", applicationId.toString(),
+                        "applicantId", "홍길동-900101-1234567",
+                        "inputSnapshotVersion", "snapshot-v1",
+                        "submittedAt", "2026-01-01T00:00:00Z",
+                        "submissionChannel", "PARTNER_API"
+                ))
+        );
+
+        ingestion.ingest(event);
+
+        String sanitized = auditEvents.findById(event.eventId()).orElseThrow().getSanitizedPayload();
+        assertThat(sanitized).contains("[REDACTED_INVALID_REFERENCE]");
+        assertThat(sanitized).doesNotContain("홍길동");
+        assertThat(sanitized).doesNotContain("900101");
+    }
+
+    @Test
+    void invalidEvidenceReferenceIsRedactedForSupportedCompletedEvent() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000017");
+        UUID runId = UUID.fromString("20000000-0000-4000-8000-000000000017");
+        EventEnvelope event = new EventEnvelope(
+                UUID.randomUUID(),
+                "agent.evaluation.completed.v1",
+                "1.1.0",
+                Instant.parse("2026-01-01T00:00:00Z"),
+                "governance-service",
+                applicationId,
+                "case-017",
+                runId,
+                applicationId.toString(),
+                null,
+                objectMapper.valueToTree(Map.of(
+                        "evaluationRunId", runId.toString(),
+                        "decisionCaseId", "case-017",
+                        "evaluationMode", "MOCK",
+                        "evaluatorId", "mock-evaluator",
+                        "decisionEnvelope", Map.of(
+                                "decisionId", UUID.randomUUID().toString(),
+                                "evaluationRunId", runId.toString(),
+                                "decisionCaseId", "case-017",
+                                "evaluatorId", "mock-evaluator",
+                                "proposal", "PROPOSE_APPROVE",
+                                "status", "PROPOSED",
+                                "usedEvidenceRefs", List.of("snapshot://safe/ref", "raw-bank-account-1234")
+                        )
+                ))
+        );
+
+        ingestion.ingest(event);
+
+        String sanitized = auditEvents.findById(event.eventId()).orElseThrow().getSanitizedPayload();
+        assertThat(sanitized).contains("snapshot://safe/ref");
+        assertThat(sanitized).contains("[REDACTED_INVALID_REFERENCE]");
+        assertThat(sanitized).doesNotContain("raw-bank-account-1234");
     }
 
     @Test
@@ -208,15 +318,112 @@ class AuditIngestionServiceIntegrationTest {
 
         ingestion.ingest(event);
 
-        assertThat(timeline("case-007").warnings()).contains("UNKNOWN_EVENT_VERSION");
+        assertThat(timeline("case-007").warnings()).contains("EVENT_GAP_DETECTED");
         String sanitized = auditEvents.findById(event.eventId()).orElseThrow().getSanitizedPayload();
         assertThat(sanitized).contains("\"redacted\":true");
+        assertThat(sanitized).contains("UNSUPPORTED_SCHEMA_VERSION");
         assertThat(sanitized).contains("incomeHistory", "requestedAmount", "apiKey");
         assertThat(sanitized).doesNotContain("private-income", "30000000.00", "secret-key");
     }
 
+    @Test
+    void unsupportedEventTypeUsesUnsupportedEventTypeReason() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000018");
+        EventEnvelope event = new EventEnvelope(
+                UUID.randomUUID(),
+                "loan.private.snapshot.v1",
+                "1.1.0",
+                Instant.parse("2026-01-01T00:00:00Z"),
+                "loan-service",
+                applicationId,
+                "case-018",
+                null,
+                applicationId.toString(),
+                null,
+                objectMapper.valueToTree(Map.of("requestedAmount", "30000000.00"))
+        );
+
+        ingestion.ingest(event);
+
+        String sanitized = auditEvents.findById(event.eventId()).orElseThrow().getSanitizedPayload();
+        assertThat(sanitized).contains("UNSUPPORTED_EVENT_TYPE");
+        assertThat(sanitized).doesNotContain("30000000.00");
+    }
+
+    @Test
+    void nonDuplicateIntegrityViolationIsRethrownAndDoesNotDisappear() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000019");
+        EventEnvelope event = new EventEnvelope(
+                UUID.randomUUID(),
+                "loan.application.submitted.v1",
+                "1.1.0",
+                Instant.parse("2026-01-01T00:00:00Z"),
+                null,
+                applicationId,
+                "case-019",
+                null,
+                applicationId.toString(),
+                null,
+                objectMapper.valueToTree(Map.of("applicationId", applicationId.toString()))
+        );
+
+        assertThatThrownBy(() -> ingestion.ingest(event))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        assertThat(auditEvents.count()).isZero();
+        assertThat(inbox.count()).isZero();
+    }
+
+    @Test
+    void malformedRawEventIsQuarantinedWithoutStorage() {
+        boolean ingested = ingestion.tryIngestRaw("{\"eventId\":\"not-a-uuid\",\"payload\":{\"ssn\":\"900101-1234567\"}");
+
+        assertThat(ingested).isFalse();
+        assertThat(auditEvents.count()).isZero();
+        assertThat(inbox.count()).isZero();
+    }
+
     private dev.rippleguard.audit.interfaces.rest.CaseTimelineResponse timeline(String caseId) {
         return new dev.rippleguard.audit.application.TimelineService(auditEvents).timeline(caseId);
+    }
+
+    private void assertCaseTimelineContractSchemaAndSemantics(
+            dev.rippleguard.audit.interfaces.rest.CaseTimelineResponse response) {
+        assertThat(response.schemaVersion()).isEqualTo("1.0.0");
+        assertThat(response.caseId()).isNotBlank();
+        assertThat(response.applicationId()).isNotNull();
+        assertThat(response.events()).isNotNull();
+        assertThat(response.traceCompleteness()).isNotNull();
+        assertThat(response.warnings()).allSatisfy(warning ->
+                assertThat(warning).isIn("EVENT_GAP_DETECTED", "RETENTION_LIMIT", "LATE_EVENT_PENDING", "INVALID_REFERENCE"));
+
+        Set<UUID> identifiers = new HashSet<>();
+        Set<UUID> seen = new HashSet<>();
+        Instant previous = null;
+        for (var event : response.events()) {
+            assertThat(identifiers.add(event.eventId())).isTrue();
+            assertThat(event.eventType()).isNotBlank();
+            assertThat(event.caseId()).isEqualTo(response.caseId());
+            assertThat(event.occurredAt()).isNotNull();
+            assertThat(event.producer()).isNotBlank();
+            assertThat(event.correlationId()).isEqualTo(response.applicationId().toString());
+            assertThat(event.status().name()).isIn("RECORDED", "LATE", "DUPLICATE", "INVALID_REFERENCE");
+            assertThat(event.summary()).isNotBlank();
+            if (previous != null) {
+                assertThat(event.occurredAt()).isAfterOrEqualTo(previous);
+            }
+            previous = event.occurredAt();
+            if (event.causationId() != null) {
+                assertThat(seen).contains(event.causationId());
+            }
+            seen.add(event.eventId());
+        }
+        if (response.traceCompleteness() == TraceCompleteness.COMPLETE) {
+            assertThat(response.events()).noneMatch(event -> event.status().name().equals("INVALID_REFERENCE"));
+        }
+        if (response.traceCompleteness() == TraceCompleteness.PARTIAL
+                || response.traceCompleteness() == TraceCompleteness.UNKNOWN) {
+            assertThat(response.warnings()).isNotEmpty();
+        }
     }
 
     private EventEnvelope event(String eventType, UUID applicationId, String caseId, UUID evaluationRunId,

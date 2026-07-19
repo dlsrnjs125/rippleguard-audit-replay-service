@@ -4,31 +4,35 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 
 @Component
 public class PayloadSanitizer {
+    private static final Pattern SAFE_REFERENCE = Pattern.compile("^(synthetic|masked):[A-Za-z0-9._/-]+$");
+    private static final String REDACTED_INVALID_REFERENCE = "[REDACTED_INVALID_REFERENCE]";
+
     private final ObjectMapper objectMapper;
 
     public PayloadSanitizer(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
     }
 
-    public JsonNode sanitize(EventEnvelope event, String payloadHash, boolean unknownVersion) {
-        if (unknownVersion) {
-            return unsupportedPayloadSummary(event, payloadHash);
+    public JsonNode sanitize(EventEnvelope event, String payloadHash, String unsupportedReason) {
+        if (unsupportedReason != null) {
+            return unsupportedPayloadSummary(event, payloadHash, unsupportedReason);
         }
         JsonNode payload = event.payload();
         if (payload == null || payload.isNull()) {
             return objectMapper.createObjectNode();
         }
         return switch (event.eventType()) {
-            case "loan.application.submitted.v1" -> allow(payload,
-                    "applicationId", "applicantId", "inputSnapshotVersion", "submittedAt", "submissionChannel");
+            case "loan.application.submitted.v1" -> sanitizeSubmitted(payload);
             case "governance.review.started.v1" -> allow(payload,
                     "decisionCaseId", "applicationId", "reviewStartedAt");
             case "agent.evaluation.requested.v1" -> allow(payload,
@@ -42,6 +46,15 @@ public class PayloadSanitizer {
                     "finalDecision", "finalizedAt");
             default -> unsupportedPayloadSummary(event, payloadHash);
         };
+    }
+
+    private ObjectNode sanitizeSubmitted(JsonNode payload) {
+        ObjectNode sanitized = allow(payload, "applicationId", "inputSnapshotVersion", "submittedAt", "submissionChannel");
+        JsonNode applicantId = payload.get("applicantId");
+        if (applicantId != null && !applicantId.isNull()) {
+            sanitized.set("applicantId", sanitizeReference(applicantId));
+        }
+        return sanitized;
     }
 
     private ObjectNode allow(JsonNode payload, String... allowedFields) {
@@ -68,7 +81,7 @@ public class PayloadSanitizer {
             copyIfPresent(envelope, decisionEnvelope, "proposal");
             copyIfPresent(envelope, decisionEnvelope, "status");
             copyIfPresent(envelope, decisionEnvelope, "confidence");
-            copyIfPresent(envelope, decisionEnvelope, "usedEvidenceRefs");
+            copyReferenceArrayIfPresent(envelope, decisionEnvelope, "usedEvidenceRefs");
             copyIfPresent(envelope, decisionEnvelope, "validUntil");
             JsonNode generatorRef = envelope.get("generatorRef");
             if (generatorRef != null && generatorRef.isObject()) {
@@ -81,10 +94,14 @@ public class PayloadSanitizer {
     }
 
     private ObjectNode unsupportedPayloadSummary(EventEnvelope event, String payloadHash) {
+        return unsupportedPayloadSummary(event, payloadHash, "UNSUPPORTED_EVENT_TYPE");
+    }
+
+    private ObjectNode unsupportedPayloadSummary(EventEnvelope event, String payloadHash, String reason) {
         ObjectNode sanitized = objectMapper.createObjectNode();
         JsonNode payload = event.payload();
         sanitized.put("redacted", true);
-        sanitized.put("reason", "UNSUPPORTED_SCHEMA_VERSION");
+        sanitized.put("reason", reason);
         sanitized.put("payloadHash", payloadHash);
         sanitized.put("payloadSize", payload == null || payload.isNull()
                 ? 0 : payload.toString().getBytes(StandardCharsets.UTF_8).length);
@@ -97,6 +114,40 @@ public class PayloadSanitizer {
         }
         sanitized.set("topLevelKeys", topLevelKeys);
         return sanitized;
+    }
+
+    private JsonNode sanitizeReference(JsonNode value) {
+        if (!value.isTextual()) {
+            return TextNode.valueOf(REDACTED_INVALID_REFERENCE);
+        }
+        String text = value.asText();
+        if (SAFE_REFERENCE.matcher(text).matches()) {
+            return value;
+        }
+        return TextNode.valueOf(REDACTED_INVALID_REFERENCE);
+    }
+
+    private JsonNode sanitizeEvidenceReference(JsonNode value) {
+        if (!value.isTextual()) {
+            return TextNode.valueOf(REDACTED_INVALID_REFERENCE);
+        }
+        String text = value.asText();
+        if (text.startsWith("snapshot://") || SAFE_REFERENCE.matcher(text).matches()) {
+            return value;
+        }
+        return TextNode.valueOf(REDACTED_INVALID_REFERENCE);
+    }
+
+    private void copyReferenceArrayIfPresent(JsonNode source, ObjectNode target, String field) {
+        JsonNode value = source.get(field);
+        if (value == null || value.isNull()) {
+            return;
+        }
+        ArrayNode sanitized = objectMapper.createArrayNode();
+        if (value.isArray()) {
+            value.forEach(item -> sanitized.add(sanitizeEvidenceReference(item)));
+        }
+        target.set(field, sanitized);
     }
 
     private void copyIfPresent(JsonNode source, ObjectNode target, String field) {
