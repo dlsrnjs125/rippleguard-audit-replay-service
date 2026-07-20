@@ -16,6 +16,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - run: ./mvnw test
-      - run: ./mvnw package
-      - run: docker build -t rippleguard-audit-replay-service:ci .
+      - run: make test
+      - run: make package
+      - name: Docker build
+        run: make docker-build
+      - name: Verify OCI labels
+        run: make verify-image-labels
