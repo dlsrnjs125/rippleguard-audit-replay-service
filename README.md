@@ -7,15 +7,15 @@
 ## Run
 
 ```bash
-./mvnw test
-./mvnw package
+make test
+make package
 cp .env.example .env
 # Fill .env with local secret values.
-./scripts/run-local.sh
-./scripts/build-image.sh
+make run-local
+make build-image
 ```
 
-`scripts/build-image.sh` packages the service and builds
+`make build-image` packages the service and builds
 `rippleguard-audit-replay-service:<commit-sha-12>`. The image records
 `org.opencontainers.image.revision` as the full Git commit SHA and
 `org.opencontainers.image.source` as this repository URL. After this PR is
