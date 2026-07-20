@@ -18,4 +18,18 @@ jobs:
           java-version: "17"
       - run: ./mvnw test
       - run: ./mvnw package
-      - run: docker build -t rippleguard-audit-replay-service:ci .
+      - name: Docker build
+        run: |
+          image="rippleguard-audit-replay-service:${GITHUB_SHA::12}"
+          docker build \
+            --build-arg "OCI_REVISION=${GITHUB_SHA}" \
+            --build-arg "OCI_SOURCE=https://github.com/dlsrnjs125/rippleguard-audit-replay-service" \
+            -t "${image}" \
+            .
+      - name: Verify OCI labels
+        run: |
+          image="rippleguard-audit-replay-service:${GITHUB_SHA::12}"
+          revision="$(docker image inspect "${image}" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          source="$(docker image inspect "${image}" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')"
+          test "${revision}" = "${GITHUB_SHA}"
+          test "${source}" = "https://github.com/dlsrnjs125/rippleguard-audit-replay-service"

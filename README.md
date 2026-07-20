@@ -9,8 +9,16 @@
 ```bash
 ./mvnw test
 ./mvnw package
-docker build -t rippleguard-audit-replay-service:local .
+./scripts/build-image.sh
 ```
+
+`scripts/build-image.sh` packages the service and builds
+`rippleguard-audit-replay-service:<commit-sha-12>`. The image records
+`org.opencontainers.image.revision` as the full Git commit SHA and
+`org.opencontainers.image.source` as this repository URL. After this PR is
+merged, build the final Audit & Replay Service image from the new `main` merge
+commit in this repository. RippleGuard Infra records and verifies the immutable
+image baseline; Infra does not own the Audit image build.
 
 ## API
 
