@@ -9,6 +9,9 @@
 ```bash
 ./mvnw test
 ./mvnw package
+cp .env.example .env
+# Fill .env with local secret values.
+./scripts/run-local.sh
 ./scripts/build-image.sh
 ```
 

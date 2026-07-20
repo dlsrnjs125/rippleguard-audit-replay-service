@@ -1,2 +1,15 @@
 target/
 .DS_Store
+.idea/
+*.iml
+
+.env
+.env.*
+!.env.example
+
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
