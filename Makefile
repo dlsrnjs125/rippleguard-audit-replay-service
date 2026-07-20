@@ -38,14 +38,14 @@ require-env:
 run-local: require-env
 	set -a; . ./.env; set +a; ./mvnw spring-boot:run
 
-docker-build: require-clean
+docker-build: package require-clean
 	docker build \
 		--build-arg "OCI_REVISION=$(OCI_REVISION)" \
 		--build-arg "OCI_SOURCE=$(OCI_SOURCE)" \
 		-t "$(IMAGE)" \
 		.
 
-verify-image-labels:
+verify-image-labels: docker-build
 	@actual_revision="$$(docker image inspect "$(IMAGE)" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"; \
 	actual_source="$$(docker image inspect "$(IMAGE)" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')"; \
 	test "$${actual_revision}" = "$(OCI_REVISION)"; \
@@ -55,4 +55,4 @@ verify-image-labels:
 	printf 'Source: %s\n' "$${actual_source}"; \
 	printf 'Provenance: PASS\n'
 
-build-image: package docker-build verify-image-labels
+build-image: verify-image-labels
