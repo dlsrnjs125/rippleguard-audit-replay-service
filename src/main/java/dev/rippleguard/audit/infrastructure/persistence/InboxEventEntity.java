@@ -26,6 +26,9 @@ public class InboxEventEntity {
     @Column(name = "duplicate_count", nullable = false)
     private int duplicateCount;
 
+    @Column(name = "conflict_count", nullable = false)
+    private int conflictCount;
+
     @Column(name = "first_seen_at", nullable = false)
     private Instant firstSeenAt;
 
@@ -41,6 +44,7 @@ public class InboxEventEntity {
         this.applicationId = applicationId;
         this.payloadHash = payloadHash;
         this.duplicateCount = 0;
+        this.conflictCount = 0;
         this.firstSeenAt = seenAt;
         this.lastSeenAt = seenAt;
     }
@@ -50,7 +54,16 @@ public class InboxEventEntity {
         this.lastSeenAt = seenAt;
     }
 
+    public void markConflict(Instant seenAt) {
+        this.conflictCount++;
+        this.lastSeenAt = seenAt;
+    }
+
     public int getDuplicateCount() {
         return duplicateCount;
+    }
+
+    public String getPayloadHash() {
+        return payloadHash;
     }
 }

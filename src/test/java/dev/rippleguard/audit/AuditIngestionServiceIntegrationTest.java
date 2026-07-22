@@ -9,9 +9,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.rippleguard.audit.application.AuditIngestionService;
 import dev.rippleguard.audit.application.EventEnvelope;
+import dev.rippleguard.audit.application.TimelineService;
 import dev.rippleguard.audit.domain.TraceCompleteness;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventRepository;
 import dev.rippleguard.audit.infrastructure.persistence.InboxEventRepository;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
@@ -52,9 +56,15 @@ class AuditIngestionServiceIntegrationTest {
     @Autowired
     ObjectMapper objectMapper;
 
+    @Autowired
+    TimelineService timelineService;
+
     @BeforeEach
     void cleanDatabase() {
+        jdbc.update("delete from agent_attempt_audit");
+        jdbc.update("delete from agent_run_audit");
         jdbc.update("delete from audit_event");
+        jdbc.update("delete from audit_event_quarantine");
         jdbc.update("delete from inbox_event");
     }
 
@@ -380,10 +390,117 @@ class AuditIngestionServiceIntegrationTest {
         assertThat(ingested).isFalse();
         assertThat(auditEvents.count()).isZero();
         assertThat(inbox.count()).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from audit_event_quarantine", Long.class)).isEqualTo(1);
+    }
+
+    @Test
+    void phase2ValidatedEventCreatesAgentRunAttemptTimelineAndApi() throws Exception {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.1.0/agent.evaluation.requested.v1--phase2.json"));
+        boolean ingested = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
+
+        assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from agent_attempt_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select validation_outcome from agent_run_audit", String.class))
+                .isEqualTo("VALIDATED");
+        assertThat(timeline("case-2001").events()).extracting("eventType")
+                .contains("governance.agent-result.validated.v1");
+
+        mvc.perform(get("/api/v1/agent-runs/{agentRunId}", "60000000-0000-4000-8000-000000002001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.validationOutcome").value("VALIDATED"))
+                .andExpect(jsonPath("$.validationReasonCodes[0]").value("SCHEMA_VALID"))
+                .andExpect(jsonPath("$.attempts[0].attemptId").value(1))
+                .andExpect(jsonPath("$.modelVersion").doesNotExist());
+
+        mvc.perform(get("/api/v1/evaluation-runs/{evaluationRunId}/agent-runs",
+                        "30000000-0000-4000-8000-000000002001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].agentRunId").value("60000000-0000-4000-8000-000000002001"));
+    }
+
+    @Test
+    void phase2RejectedEventKeepsOutcomeDistinctFromAuditIngestionStatus() {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.1.0/agent.evaluation.requested.v1--phase2.json"));
+        boolean ingested = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1--rejected.json"));
+
+        assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select validation_outcome from agent_run_audit", String.class))
+                .isEqualTo("REJECTED");
+        assertThat(jdbc.queryForObject("select ingestion_status from agent_run_audit", String.class))
+                .isEqualTo("ACCEPTED");
+        assertThat(timeline("case-2001").events()).extracting("summary")
+                .contains("Agent result rejected by Governance");
+    }
+
+    @Test
+    void phase2InvalidProducerIsQuarantinedWithoutProjection() {
+        boolean ingested = ingestion.tryIngestRaw(contractFixture(
+                "examples/invalid/events/v1.0.0/governance.agent-result.validated.v1--agent-runtime-producer.json"));
+
+        assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
+                .isEqualTo("INVALID_PRODUCER");
+    }
+
+    @Test
+    void phase2BrokenCausationIsQuarantinedWithoutProjection() {
+        boolean ingested = ingestion.tryIngestRaw(contractFixture(
+                "examples/invalid/events/v1.0.0/governance.agent-result.validated.v1--broken-causation.json"));
+
+        assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
+                .isEqualTo("BROKEN_CAUSATION");
+    }
+
+    @Test
+    void phase2ConflictingAgentRunIsQuarantinedWithoutOverwritingProjection() {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.1.0/agent.evaluation.requested.v1--phase2.json"));
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
+
+        boolean ingested = ingestion.tryIngestRaw(contractFixture(
+                "examples/valid/events/v1.0.0/governance.agent-result.validated.v1--rejected.json"));
+
+        assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select validation_outcome from agent_run_audit", String.class))
+                .isEqualTo("VALIDATED");
+        assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
+                .isEqualTo("DUPLICATE_AGENT_RUN_CONFLICT");
+        assertThat(auditEvents.count()).isEqualTo(2);
+    }
+
+    @Test
+    void sameEventIdDifferentPayloadIsConflictQuarantined() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000020");
+        EventEnvelope first = event("loan.application.submitted.v1", applicationId, "case-020", null, null,
+                Instant.parse("2026-01-01T00:00:00Z"));
+        EventEnvelope conflicting = new EventEnvelope(
+                first.eventId(),
+                first.eventType(),
+                first.schemaVersion(),
+                first.occurredAt(),
+                first.producer(),
+                first.applicationId(),
+                first.caseId(),
+                first.evaluationRunId(),
+                first.correlationId(),
+                first.causationId(),
+                objectMapper.valueToTree(Map.of("applicationId", applicationId.toString(), "status", "different"))
+        );
+
+        ingestion.ingest(first);
+        ingestion.ingest(conflicting);
+
+        assertThat(auditEvents.count()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
+                .isEqualTo("CONFLICTING_EVENT_PAYLOAD");
     }
 
     private dev.rippleguard.audit.interfaces.rest.CaseTimelineResponse timeline(String caseId) {
-        return new dev.rippleguard.audit.application.TimelineService(auditEvents).timeline(caseId);
+        return timelineService.timeline(caseId);
     }
 
     private void assertCaseTimelineContractSchemaAndSemantics(
@@ -450,5 +567,13 @@ class AuditIngestionServiceIntegrationTest {
     private String producer(String eventType) {
         return eventType.startsWith("governance.") || eventType.startsWith("agent.")
                 || eventType.equals("loan.decision.commanded.v1") ? "governance-service" : "loan-service";
+    }
+
+    private String contractFixture(String relativePath) {
+        try {
+            return Files.readString(Path.of("..", "rippleguard-contracts", relativePath));
+        } catch (IOException exception) {
+            throw new IllegalStateException("Missing contract fixture: " + relativePath, exception);
+        }
     }
 }

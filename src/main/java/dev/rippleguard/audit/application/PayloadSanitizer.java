@@ -44,6 +44,10 @@ public class PayloadSanitizer {
             case "loan.decision.finalized.v1" -> allow(payload,
                     "commandId", "decisionCaseId", "applicationId", "decisionId", "evaluationRunId",
                     "finalDecision", "finalizedAt");
+            case "governance.agent-result.validated.v1" -> allow(payload,
+                    "decisionCaseId", "evaluationRunId", "agentRunId", "attemptId", "agentResultReference",
+                    "agentResultDigest", "validationOutcome", "validationReasonCodes", "validatedSchemaVersion",
+                    "validatedAt");
             default -> unsupportedPayloadSummary(event, payloadHash);
         };
     }

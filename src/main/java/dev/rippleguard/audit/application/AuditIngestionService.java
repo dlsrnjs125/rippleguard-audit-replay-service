@@ -1,6 +1,10 @@
 package dev.rippleguard.audit.application;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import dev.rippleguard.audit.domain.AuditQuarantineReason;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventEntity;
+import dev.rippleguard.audit.infrastructure.persistence.AuditEventQuarantineEntity;
+import dev.rippleguard.audit.infrastructure.persistence.AuditEventQuarantineRepository;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventRepository;
 import dev.rippleguard.audit.infrastructure.persistence.InboxEventEntity;
 import dev.rippleguard.audit.infrastructure.persistence.InboxEventRepository;
@@ -27,20 +31,26 @@ public class AuditIngestionService {
     );
 
     private final AuditEventRepository auditEvents;
+    private final AuditEventQuarantineRepository quarantine;
     private final InboxEventRepository inbox;
+    private final Phase2AgentResultProjectionService phase2Projection;
     private final JsonSupport json;
     private final PayloadSanitizer sanitizer;
     private final Clock clock;
     private final TransactionTemplate transactions;
 
     public AuditIngestionService(AuditEventRepository auditEvents,
+                                 AuditEventQuarantineRepository quarantine,
                                  InboxEventRepository inbox,
+                                 Phase2AgentResultProjectionService phase2Projection,
                                  JsonSupport json,
                                  PayloadSanitizer sanitizer,
                                  Clock clock,
                                  TransactionTemplate transactions) {
         this.auditEvents = auditEvents;
+        this.quarantine = quarantine;
         this.inbox = inbox;
+        this.phase2Projection = phase2Projection;
         this.json = json;
         this.sanitizer = sanitizer;
         this.clock = clock;
@@ -48,7 +58,8 @@ public class AuditIngestionService {
     }
 
     public void ingestRaw(String rawMessage) {
-        ingest(json.eventEnvelope(rawMessage));
+        JsonNode rawEnvelope = json.jsonNode(rawMessage);
+        ingest(json.eventEnvelope(rawMessage), rawEnvelope);
     }
 
     public boolean tryIngestRaw(String rawMessage) {
@@ -56,15 +67,18 @@ public class AuditIngestionService {
             ingestRaw(rawMessage);
             return true;
         } catch (IllegalArgumentException exception) {
-            log.warn("Malformed audit event quarantined payloadHash={} reason={}",
-                    json.sha256(rawMessage), exception.getMessage());
+            quarantineMalformed(rawMessage, exception.getMessage());
             return false;
         }
     }
 
     public void ingest(EventEnvelope event) {
+        ingest(event, json.eventEnvelopeNode(event));
+    }
+
+    public void ingest(EventEnvelope event, JsonNode rawEnvelope) {
         try {
-            transactions.executeWithoutResult(status -> ingestInTransaction(event));
+            transactions.executeWithoutResult(status -> ingestInTransaction(event, rawEnvelope));
         } catch (DataIntegrityViolationException duplicate) {
             if (!recordDuplicateInNewTransaction(event)) {
                 throw duplicate;
@@ -72,14 +86,28 @@ public class AuditIngestionService {
         }
     }
 
-    private void ingestInTransaction(EventEnvelope event) {
+    private void ingestInTransaction(EventEnvelope event, JsonNode rawEnvelope) {
         Instant now = clock.instant();
-        String payloadHash = json.sha256(event.payload() == null ? "" : event.payload().toString());
+        String payloadHash = json.sha256(rawEnvelope);
         var existingInbox = inbox.findById(event.eventId());
         if (existingInbox.isPresent()) {
-            existingInbox.get().markDuplicate(now);
-            log.info("Duplicate audit event ignored eventId={} eventType={}", event.eventId(), event.eventType());
+            if (existingInbox.get().getPayloadHash().equals(payloadHash)) {
+                existingInbox.get().markDuplicate(now);
+                log.info("Duplicate audit event ignored eventId={} eventType={}", event.eventId(), event.eventType());
+                return;
+            }
+            existingInbox.get().markConflict(now);
+            quarantine(event, AuditQuarantineReason.CONFLICTING_EVENT_PAYLOAD, payloadHash, now, false);
+            log.warn("Conflicting audit event quarantined eventId={} eventType={}", event.eventId(), event.eventType());
             return;
+        }
+
+        if (phase2Projection.supports(event)) {
+            AuditQuarantineReason reason = phase2Projection.rejectionReason(event, rawEnvelope);
+            if (reason != null) {
+                quarantine(event, reason, payloadHash, now, false);
+                return;
+            }
         }
 
         String unsupportedReason = unsupportedReason(event);
@@ -108,6 +136,14 @@ public class AuditIngestionService {
                 unknownVersion,
                 now
         ));
+        if (phase2Projection.supports(event)) {
+            try {
+                phase2Projection.project(event);
+            } catch (DataIntegrityViolationException conflict) {
+                quarantine(event, AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT, payloadHash, now, false);
+                throw conflict;
+            }
+        }
     }
 
     private boolean recordDuplicateInNewTransaction(EventEnvelope event) {
@@ -129,5 +165,41 @@ public class AuditIngestionService {
             return "UNSUPPORTED_SCHEMA_VERSION";
         }
         return null;
+    }
+
+    private void quarantineMalformed(String rawMessage, String reason) {
+        transactions.executeWithoutResult(status -> quarantine.save(new AuditEventQuarantineEntity(
+                java.util.UUID.randomUUID(),
+                null,
+                null,
+                null,
+                null,
+                clock.instant(),
+                AuditQuarantineReason.MALFORMED_EVENT,
+                json.sha256(rawMessage),
+                null,
+                null,
+                false
+        )));
+        log.warn("Malformed audit event quarantined payloadHash={} reason={}", json.sha256(rawMessage), reason);
+    }
+
+    private void quarantine(EventEnvelope event, AuditQuarantineReason reason, String payloadHash,
+                            Instant receivedAt, boolean retryEligible) {
+        quarantine.save(new AuditEventQuarantineEntity(
+                java.util.UUID.randomUUID(),
+                event.eventId(),
+                event.eventType(),
+                event.schemaVersion(),
+                event.producer(),
+                receivedAt,
+                reason,
+                payloadHash,
+                event.correlationId(),
+                event.causationId(),
+                retryEligible
+        ));
+        log.warn("Audit event quarantined eventId={} eventType={} reason={} retryEligible={}",
+                event.eventId(), event.eventType(), reason, retryEligible);
     }
 }
