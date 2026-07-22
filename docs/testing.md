@@ -15,6 +15,7 @@ Coverage includes:
 - Phase 2 Governance validation event contract fixtures
 - Agent Run and Attempt projection
 - invalid producer quarantine
+- bounded pending causation resolution and expiry
 - broken causation quarantine
 - same event id conflicting payload quarantine
 - Agent Run API lookup

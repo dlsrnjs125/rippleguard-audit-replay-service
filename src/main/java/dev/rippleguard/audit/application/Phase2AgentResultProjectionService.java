@@ -46,6 +46,10 @@ public class Phase2AgentResultProjectionService {
     }
 
     public AuditQuarantineReason rejectionReason(EventEnvelope event, JsonNode rawEnvelope) {
+        return rejectionReason(event, rawEnvelope, true);
+    }
+
+    public AuditQuarantineReason rejectionReason(EventEnvelope event, JsonNode rawEnvelope, boolean requirePredecessor) {
         if (!SCHEMA_VERSION.equals(event.schemaVersion())) {
             return AuditQuarantineReason.UNSUPPORTED_SCHEMA_VERSION;
         }
@@ -72,6 +76,9 @@ public class Phase2AgentResultProjectionService {
         }
         UUID agentRunId = UUID.fromString(payload.path("agentRunId").asText());
         int attemptId = payload.path("attemptId").asInt();
+        if (event.causationId().equals(agentRunId)) {
+            return AuditQuarantineReason.BROKEN_CAUSATION;
+        }
         String expectedReference = "agent-result://" + event.caseId() + "/" + agentRunId + "/attempt-" + attemptId;
         if (!expectedReference.equals(payload.path("agentResultReference").asText())) {
             return AuditQuarantineReason.RESULT_REFERENCE_MISMATCH;
@@ -80,7 +87,7 @@ public class Phase2AgentResultProjectionService {
         if (existingRun.isPresent() && conflictsWith(existingRun.get(), payload, attemptId)) {
             return AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT;
         }
-        if (!isGovernanceAgentRunCausation(event, agentRunId) && !auditEvents.existsById(event.causationId())) {
+        if (requirePredecessor && !auditEvents.existsById(event.causationId())) {
             return AuditQuarantineReason.BROKEN_CAUSATION;
         }
         return null;
@@ -144,7 +151,4 @@ public class Phase2AgentResultProjectionService {
                 || existing.getLatestAttemptId() != attemptId;
     }
 
-    private boolean isGovernanceAgentRunCausation(EventEnvelope event, UUID agentRunId) {
-        return event.causationId().equals(agentRunId);
-    }
 }
