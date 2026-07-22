@@ -12,6 +12,12 @@ Coverage includes:
 - API lookup
 - contract example deserialization
 - PostgreSQL Flyway migration validation
+- Phase 2 Governance validation event contract fixtures
+- Agent Run and Attempt projection
+- invalid producer quarantine
+- broken causation quarantine
+- same event id conflicting payload quarantine
+- Agent Run API lookup
 
 Run:
 

@@ -23,6 +23,7 @@ public class AuditEventConsumer {
             "${rippleguard.kafka.topics.governance-review-started}",
             "${rippleguard.kafka.topics.agent-evaluation-requested}",
             "${rippleguard.kafka.topics.agent-evaluation-completed}",
+            "${rippleguard.kafka.topics.governance-agent-result-validated}",
             "${rippleguard.kafka.topics.loan-decision-commanded}",
             "${rippleguard.kafka.topics.loan-decision-finalized}"
     })

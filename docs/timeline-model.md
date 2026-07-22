@@ -17,3 +17,20 @@ Trace completeness is:
 - `UNKNOWN` only for an empty internal event set
 
 Timeline event status can be `RECORDED`, `LATE`, or `INVALID_REFERENCE`.
+
+## Phase 2 Agent Run Read Model
+
+`agent_run_audit` stores Governance validation outcomes for Phase 2 Agent Results:
+
+- decision case id, evaluation run id, agent run id
+- `VALIDATED` or `REJECTED` validation outcome
+- validation reason codes
+- agent result reference and digest
+- source event id and schema version
+- validated timestamp, latest attempt id, and observed attempt count
+
+`agent_attempt_audit` stores the attempt identity that is present in the Governance validation event. It does not invent earlier retry attempts when those attempts were not emitted as audit events. `attempt_count` is the number of attempts observed by Audit for this terminal validation event, not a reconstruction from `attemptId`.
+
+The validation event does not currently carry full model, snapshot, feature, preprocessing, or threshold metadata, so those read-model fields remain nullable. The service does not fill them from current Governance DB state, Agent Runtime output, model manifests, or defaults.
+
+`GET /api/v1/cases/{caseId}/timeline` includes `governance.agent-result.validated.v1` with a summary derived from the Agent Run projection outcome. If the accepted audit event is missing its Agent Run projection, the summary is `Agent result projection unavailable` instead of defaulting to validated. Rejected results are displayed as Governance rejection and are not represented as final loan decisions.

@@ -3,6 +3,7 @@ package dev.rippleguard.audit.application;
 import dev.rippleguard.audit.domain.TimelineEventStatus;
 import dev.rippleguard.audit.domain.TimelineWarning;
 import dev.rippleguard.audit.domain.TraceCompleteness;
+import dev.rippleguard.audit.infrastructure.persistence.AgentRunAuditRepository;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventEntity;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventRepository;
 import dev.rippleguard.audit.interfaces.rest.CaseTimelineResponse;
@@ -30,9 +31,11 @@ public class TimelineService {
     );
 
     private final AuditEventRepository auditEvents;
+    private final AgentRunAuditRepository agentRuns;
 
-    public TimelineService(AuditEventRepository auditEvents) {
+    public TimelineService(AuditEventRepository auditEvents, AgentRunAuditRepository agentRuns) {
         this.auditEvents = auditEvents;
+        this.agentRuns = agentRuns;
     }
 
     @Transactional(readOnly = true)
@@ -52,7 +55,9 @@ public class TimelineService {
             if (event.isUnknownVersion()) {
                 warnings.add(TimelineWarning.EVENT_GAP_DETECTED);
             }
-            if (event.getCausationId() != null && !eventIds.contains(event.getCausationId())) {
+            if (event.getCausationId() != null
+                    && !eventIds.contains(event.getCausationId())
+                    && !isKnownPhase2AgentRunReference(event)) {
                 warnings.add(TimelineWarning.INVALID_REFERENCE);
                 warnings.add(TimelineWarning.EVENT_GAP_DETECTED);
             }
@@ -105,7 +110,9 @@ public class TimelineService {
         Set<UUID> seen = new HashSet<>();
         Set<UUID> invalid = new HashSet<>();
         for (AuditEventEntity event : events) {
-            if (event.getCausationId() != null && !seen.contains(event.getCausationId())) {
+            if (event.getCausationId() != null
+                    && !seen.contains(event.getCausationId())
+                    && !isKnownPhase2AgentRunReference(event)) {
                 invalid.add(event.getEventId());
             }
             seen.add(event.getEventId());
@@ -171,8 +178,29 @@ public class TimelineService {
             case "agent.evaluation.completed.v1" -> "Mock evaluation completed";
             case "loan.decision.commanded.v1" -> "Loan decision commanded";
             case "loan.decision.finalized.v1" -> "Loan decision finalized";
+            case "governance.agent-result.validated.v1" -> phase2Summary(event);
             default -> "Unknown Phase 1 event version or type recorded";
         };
+    }
+
+    private String phase2Summary(AuditEventEntity event) {
+        return agentRuns.findBySourceEventId(event.getEventId())
+                .map(run -> "REJECTED".equals(run.getValidationOutcome())
+                        ? "Agent result rejected by Governance"
+                        : "VALIDATED".equals(run.getValidationOutcome())
+                        ? "Agent result validated by Governance"
+                        : "Agent result projection unavailable")
+                .orElse("Agent result projection unavailable");
+    }
+
+    private boolean isKnownPhase2AgentRunReference(AuditEventEntity event) {
+        if (!Phase2AgentResultProjectionService.EVENT_TYPE.equals(event.getEventType())
+                || event.getCausationId() == null) {
+            return false;
+        }
+        return agentRuns.findBySourceEventId(event.getEventId())
+                .map(run -> event.getCausationId().equals(run.getAgentRunId()))
+                .orElse(false);
     }
 
     private record TimelineQueryResult(List<AuditEventEntity> events, boolean ambiguousCorrelation) {
