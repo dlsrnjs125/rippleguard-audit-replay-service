@@ -13,9 +13,8 @@ import dev.rippleguard.audit.application.TimelineService;
 import dev.rippleguard.audit.domain.TraceCompleteness;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventRepository;
 import dev.rippleguard.audit.infrastructure.persistence.InboxEventRepository;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
@@ -570,10 +569,14 @@ class AuditIngestionServiceIntegrationTest {
     }
 
     private String contractFixture(String relativePath) {
-        try {
-            return Files.readString(Path.of("..", "rippleguard-contracts", relativePath));
-        } catch (IOException exception) {
-            throw new IllegalStateException("Missing contract fixture: " + relativePath, exception);
+        String resourcePath = "/contracts/" + relativePath;
+        try (var stream = getClass().getResourceAsStream(resourcePath)) {
+            if (stream == null) {
+                throw new IllegalStateException("Missing contract fixture: " + resourcePath);
+            }
+            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (java.io.IOException exception) {
+            throw new UncheckedIOException("Failed to read contract fixture: " + resourcePath, exception);
         }
     }
 }
