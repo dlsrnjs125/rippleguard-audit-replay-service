@@ -55,7 +55,9 @@ public class TimelineService {
             if (event.isUnknownVersion()) {
                 warnings.add(TimelineWarning.EVENT_GAP_DETECTED);
             }
-            if (event.getCausationId() != null && !eventIds.contains(event.getCausationId())) {
+            if (event.getCausationId() != null
+                    && !eventIds.contains(event.getCausationId())
+                    && !isKnownPhase2AgentRunReference(event)) {
                 warnings.add(TimelineWarning.INVALID_REFERENCE);
                 warnings.add(TimelineWarning.EVENT_GAP_DETECTED);
             }
@@ -108,7 +110,9 @@ public class TimelineService {
         Set<UUID> seen = new HashSet<>();
         Set<UUID> invalid = new HashSet<>();
         for (AuditEventEntity event : events) {
-            if (event.getCausationId() != null && !seen.contains(event.getCausationId())) {
+            if (event.getCausationId() != null
+                    && !seen.contains(event.getCausationId())
+                    && !isKnownPhase2AgentRunReference(event)) {
                 invalid.add(event.getEventId());
             }
             seen.add(event.getEventId());
@@ -180,17 +184,23 @@ public class TimelineService {
     }
 
     private String phase2Summary(AuditEventEntity event) {
-        if (agentRuns != null) {
-            return agentRuns.findBySourceEventId(event.getEventId())
-                    .map(run -> "REJECTED".equals(run.getValidationOutcome())
-                            ? "Agent result rejected by Governance"
-                            : "Agent result validated by Governance")
-                    .orElse("Agent result validated by Governance");
+        return agentRuns.findBySourceEventId(event.getEventId())
+                .map(run -> "REJECTED".equals(run.getValidationOutcome())
+                        ? "Agent result rejected by Governance"
+                        : "VALIDATED".equals(run.getValidationOutcome())
+                        ? "Agent result validated by Governance"
+                        : "Agent result projection unavailable")
+                .orElse("Agent result projection unavailable");
+    }
+
+    private boolean isKnownPhase2AgentRunReference(AuditEventEntity event) {
+        if (!Phase2AgentResultProjectionService.EVENT_TYPE.equals(event.getEventType())
+                || event.getCausationId() == null) {
+            return false;
         }
-        if (event.getSanitizedPayload().contains("REJECTED")) {
-            return "Agent result rejected by Governance";
-        }
-        return "Agent result validated by Governance";
+        return agentRuns.findBySourceEventId(event.getEventId())
+                .map(run -> event.getCausationId().equals(run.getAgentRunId()))
+                .orElse(false);
     }
 
     private record TimelineQueryResult(List<AuditEventEntity> events, boolean ambiguousCorrelation) {

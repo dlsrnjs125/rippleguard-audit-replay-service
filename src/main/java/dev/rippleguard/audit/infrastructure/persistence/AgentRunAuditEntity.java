@@ -104,7 +104,7 @@ public class AgentRunAuditEntity {
         this.validatedSchemaVersion = validatedSchemaVersion;
         this.validatedAt = validatedAt;
         this.latestAttemptId = latestAttemptId;
-        this.attemptCount = latestAttemptId;
+        this.attemptCount = 1;
         this.firstOccurredAt = occurredAt;
         this.lastOccurredAt = occurredAt;
         this.sourceEventId = sourceEventId;

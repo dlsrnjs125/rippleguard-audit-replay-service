@@ -80,10 +80,18 @@ public class Phase2AgentResultProjectionService {
         if (existingRun.isPresent() && conflictsWith(existingRun.get(), payload, attemptId)) {
             return AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT;
         }
-        if (!auditEvents.existsById(event.causationId())) {
+        if (!event.causationId().equals(agentRunId) && !auditEvents.existsById(event.causationId())) {
             return AuditQuarantineReason.BROKEN_CAUSATION;
         }
         return null;
+    }
+
+    public boolean isProjectionConflict(EventEnvelope event) {
+        JsonNode payload = event.payload();
+        UUID agentRunId = UUID.fromString(payload.path("agentRunId").asText());
+        return agentRuns.findById(agentRunId)
+                .map(existing -> conflictsWith(existing, payload, payload.path("attemptId").asInt()))
+                .orElse(false);
     }
 
     public void project(EventEnvelope event) {

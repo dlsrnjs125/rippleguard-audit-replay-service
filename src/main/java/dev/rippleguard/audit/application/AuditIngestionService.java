@@ -79,9 +79,14 @@ public class AuditIngestionService {
     public void ingest(EventEnvelope event, JsonNode rawEnvelope) {
         try {
             transactions.executeWithoutResult(status -> ingestInTransaction(event, rawEnvelope));
-        } catch (DataIntegrityViolationException duplicate) {
+        } catch (DataIntegrityViolationException exception) {
+            if (phase2Projection.supports(event) && phase2Projection.isProjectionConflict(event)) {
+                quarantineInNewTransaction(event, AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT,
+                        json.sha256(rawEnvelope), false);
+                return;
+            }
             if (!recordDuplicateInNewTransaction(event)) {
-                throw duplicate;
+                throw exception;
             }
         }
     }
@@ -137,12 +142,7 @@ public class AuditIngestionService {
                 now
         ));
         if (phase2Projection.supports(event)) {
-            try {
-                phase2Projection.project(event);
-            } catch (DataIntegrityViolationException conflict) {
-                quarantine(event, AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT, payloadHash, now, false);
-                throw conflict;
-            }
+            phase2Projection.project(event);
         }
     }
 
@@ -182,6 +182,12 @@ public class AuditIngestionService {
                 false
         )));
         log.warn("Malformed audit event quarantined payloadHash={} reason={}", json.sha256(rawMessage), reason);
+    }
+
+    private void quarantineInNewTransaction(EventEnvelope event, AuditQuarantineReason reason, String payloadHash,
+                                            boolean retryEligible) {
+        transactions.executeWithoutResult(status ->
+                quarantine(event, reason, payloadHash, clock.instant(), retryEligible));
     }
 
     private void quarantine(EventEnvelope event, AuditQuarantineReason reason, String payloadHash,

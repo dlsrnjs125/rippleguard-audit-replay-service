@@ -12,7 +12,7 @@ Audit Replay Service는 Loan Service나 Governance Service의 상태를 수정�
 - validates the bundled `rippleguard-contracts` JSON Schema before projection
 - rejects invalid producer, unsupported schema, broken causation, result reference mismatch, and conflicting event payloads into quarantine
 - stores Agent Run and Attempt read models for `VALIDATED` and `REJECTED`
-- preserves result reference and digest without recomputing or overwriting Governance's outcome
+- preserves result reference and digest without recomputing the Agent Result body digest or overwriting Governance's outcome
 - leaves model, snapshot, feature, preprocessing, and threshold metadata nullable when the validation event does not carry those fields
 
 This is not the Phase 7 replay engine. It does not run replay, call Agent Runtime, recalculate SHAP, download model artifacts, build hash chains, or create graph APIs.

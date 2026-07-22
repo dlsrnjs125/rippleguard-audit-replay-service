@@ -11,6 +11,7 @@ import dev.rippleguard.audit.application.AuditIngestionService;
 import dev.rippleguard.audit.application.EventEnvelope;
 import dev.rippleguard.audit.application.TimelineService;
 import dev.rippleguard.audit.domain.TraceCompleteness;
+import dev.rippleguard.audit.infrastructure.persistence.AuditEventEntity;
 import dev.rippleguard.audit.infrastructure.persistence.AuditEventRepository;
 import dev.rippleguard.audit.infrastructure.persistence.InboxEventRepository;
 import java.io.UncheckedIOException;
@@ -394,7 +395,6 @@ class AuditIngestionServiceIntegrationTest {
 
     @Test
     void phase2ValidatedEventCreatesAgentRunAttemptTimelineAndApi() throws Exception {
-        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.1.0/agent.evaluation.requested.v1--phase2.json"));
         boolean ingested = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
 
         assertThat(ingested).isTrue();
@@ -402,8 +402,11 @@ class AuditIngestionServiceIntegrationTest {
         assertThat(jdbc.queryForObject("select count(*) from agent_attempt_audit", Long.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("select validation_outcome from agent_run_audit", String.class))
                 .isEqualTo("VALIDATED");
-        assertThat(timeline("case-2001").events()).extracting("eventType")
+        assertThat(jdbc.queryForObject("select attempt_count from agent_run_audit", Integer.class)).isEqualTo(1);
+        var timeline = timeline("case-2001");
+        assertThat(timeline.events()).extracting("eventType")
                 .contains("governance.agent-result.validated.v1");
+        assertThat(timeline.warnings()).doesNotContain("INVALID_REFERENCE");
 
         mvc.perform(get("/api/v1/agent-runs/{agentRunId}", "60000000-0000-4000-8000-000000002001"))
                 .andExpect(status().isOk())
@@ -420,7 +423,6 @@ class AuditIngestionServiceIntegrationTest {
 
     @Test
     void phase2RejectedEventKeepsOutcomeDistinctFromAuditIngestionStatus() {
-        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.1.0/agent.evaluation.requested.v1--phase2.json"));
         boolean ingested = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1--rejected.json"));
 
         assertThat(ingested).isTrue();
@@ -428,6 +430,8 @@ class AuditIngestionServiceIntegrationTest {
                 .isEqualTo("REJECTED");
         assertThat(jdbc.queryForObject("select ingestion_status from agent_run_audit", String.class))
                 .isEqualTo("ACCEPTED");
+        assertThat(jdbc.queryForObject("select latest_attempt_id from agent_run_audit", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("select attempt_count from agent_run_audit", Integer.class)).isEqualTo(1);
         assertThat(timeline("case-2001").events()).extracting("summary")
                 .contains("Agent result rejected by Governance");
     }
@@ -456,7 +460,6 @@ class AuditIngestionServiceIntegrationTest {
 
     @Test
     void phase2ConflictingAgentRunIsQuarantinedWithoutOverwritingProjection() {
-        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.1.0/agent.evaluation.requested.v1--phase2.json"));
         ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
 
         boolean ingested = ingestion.tryIngestRaw(contractFixture(
@@ -468,7 +471,33 @@ class AuditIngestionServiceIntegrationTest {
                 .isEqualTo("VALIDATED");
         assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
                 .isEqualTo("DUPLICATE_AGENT_RUN_CONFLICT");
-        assertThat(auditEvents.count()).isEqualTo(2);
+        assertThat(auditEvents.count()).isEqualTo(1);
+    }
+
+    @Test
+    void phase2TimelineDoesNotInferValidatedWhenProjectionIsMissing() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000002001");
+        UUID eventId = UUID.fromString("10000000-0000-4000-8000-000000002777");
+        UUID agentRunId = UUID.fromString("60000000-0000-4000-8000-000000002001");
+        auditEvents.save(new AuditEventEntity(
+                eventId,
+                "governance.agent-result.validated.v1",
+                "1.0.0",
+                Instant.parse("2026-07-21T01:10:04Z"),
+                "governance-service",
+                applicationId,
+                "case-2001",
+                UUID.fromString("30000000-0000-4000-8000-000000002001"),
+                applicationId.toString(),
+                agentRunId,
+                "{\"validationOutcome\":\"VALIDATED\"}",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                false,
+                Instant.parse("2026-07-21T01:10:05Z")
+        ));
+
+        assertThat(timeline("case-2001").events()).extracting("summary")
+                .contains("Agent result projection unavailable");
     }
 
     @Test
