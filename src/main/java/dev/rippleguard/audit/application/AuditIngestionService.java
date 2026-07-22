@@ -77,16 +77,21 @@ public class AuditIngestionService {
     }
 
     public void ingest(EventEnvelope event, JsonNode rawEnvelope) {
+        String payloadHash = json.sha256(rawEnvelope);
         try {
             transactions.executeWithoutResult(status -> ingestInTransaction(event, rawEnvelope));
         } catch (DataIntegrityViolationException exception) {
             if (phase2Projection.supports(event) && phase2Projection.isProjectionConflict(event)) {
                 quarantineInNewTransaction(event, AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT,
-                        json.sha256(rawEnvelope), false);
+                        payloadHash, false);
                 return;
             }
-            if (!recordDuplicateInNewTransaction(event)) {
-                throw exception;
+            DuplicateRecoveryResult recovery = recoverDuplicateInNewTransaction(event, payloadHash);
+            switch (recovery) {
+                case DUPLICATE, CONFLICT -> {
+                    return;
+                }
+                case NOT_FOUND -> throw exception;
             }
         }
     }
@@ -146,15 +151,24 @@ public class AuditIngestionService {
         }
     }
 
-    private boolean recordDuplicateInNewTransaction(EventEnvelope event) {
-        return Boolean.TRUE.equals(transactions.execute(status -> inbox.findById(event.eventId())
+    private DuplicateRecoveryResult recoverDuplicateInNewTransaction(EventEnvelope event, String incomingPayloadHash) {
+        DuplicateRecoveryResult result = transactions.execute(status -> inbox.findById(event.eventId())
                 .map(existing -> {
+                    if (!existing.getPayloadHash().equals(incomingPayloadHash)) {
+                        existing.markConflict(clock.instant());
+                        quarantine(event, AuditQuarantineReason.CONFLICTING_EVENT_PAYLOAD,
+                                incomingPayloadHash, clock.instant(), false);
+                        log.warn("Recovered concurrent conflicting audit event eventId={} eventType={}",
+                                event.eventId(), event.eventType());
+                        return DuplicateRecoveryResult.CONFLICT;
+                    }
                     existing.markDuplicate(clock.instant());
                     log.info("Recovered concurrent duplicate audit event eventId={} eventType={}",
                             event.eventId(), event.eventType());
-                    return true;
+                    return DuplicateRecoveryResult.DUPLICATE;
                 })
-                .orElse(false)));
+                .orElse(DuplicateRecoveryResult.NOT_FOUND));
+        return result == null ? DuplicateRecoveryResult.NOT_FOUND : result;
     }
 
     private String unsupportedReason(EventEnvelope event) {
@@ -207,5 +221,11 @@ public class AuditIngestionService {
         ));
         log.warn("Audit event quarantined eventId={} eventType={} reason={} retryEligible={}",
                 event.eventId(), event.eventType(), reason, retryEligible);
+    }
+
+    private enum DuplicateRecoveryResult {
+        DUPLICATE,
+        CONFLICT,
+        NOT_FOUND
     }
 }

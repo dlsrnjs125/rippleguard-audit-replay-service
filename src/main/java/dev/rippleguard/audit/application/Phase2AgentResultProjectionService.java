@@ -80,7 +80,7 @@ public class Phase2AgentResultProjectionService {
         if (existingRun.isPresent() && conflictsWith(existingRun.get(), payload, attemptId)) {
             return AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT;
         }
-        if (!event.causationId().equals(agentRunId) && !auditEvents.existsById(event.causationId())) {
+        if (!isGovernanceAgentRunCausation(event, agentRunId) && !auditEvents.existsById(event.causationId())) {
             return AuditQuarantineReason.BROKEN_CAUSATION;
         }
         return null;
@@ -142,5 +142,9 @@ public class Phase2AgentResultProjectionService {
         return !existing.getAgentResultDigest().equals(payload.path("agentResultDigest").asText())
                 || !existing.getValidationOutcome().equals(payload.path("validationOutcome").asText())
                 || existing.getLatestAttemptId() != attemptId;
+    }
+
+    private boolean isGovernanceAgentRunCausation(EventEnvelope event, UUID agentRunId) {
+        return event.causationId().equals(agentRunId);
     }
 }
