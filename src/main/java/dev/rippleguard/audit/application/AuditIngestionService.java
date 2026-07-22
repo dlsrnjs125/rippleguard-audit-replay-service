@@ -81,17 +81,19 @@ public class AuditIngestionService {
         try {
             transactions.executeWithoutResult(status -> ingestInTransaction(event, rawEnvelope));
         } catch (DataIntegrityViolationException exception) {
-            if (phase2Projection.supports(event) && phase2Projection.isProjectionConflict(event)) {
-                quarantineInNewTransaction(event, AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT,
-                        payloadHash, false);
-                return;
-            }
             DuplicateRecoveryResult recovery = recoverDuplicateInNewTransaction(event, payloadHash);
             switch (recovery) {
                 case DUPLICATE, CONFLICT -> {
                     return;
                 }
-                case NOT_FOUND -> throw exception;
+                case NOT_FOUND -> {
+                    if (phase2Projection.supports(event) && phase2Projection.isProjectionConflict(event)) {
+                        quarantineInNewTransaction(event, AuditQuarantineReason.DUPLICATE_AGENT_RUN_CONFLICT,
+                                payloadHash, false);
+                        return;
+                    }
+                    throw exception;
+                }
             }
         }
     }
