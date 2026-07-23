@@ -6,7 +6,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@EnableConfigurationProperties(AuditKafkaProperties.class)
+@EnableConfigurationProperties({
+        AuditKafkaProperties.class,
+        Phase2PendingCausationProperties.class
+})
 public class AuditConfig {
     @Bean
     Clock clock() {

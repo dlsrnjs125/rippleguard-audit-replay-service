@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.rippleguard.audit.application.AuditIngestionService;
 import dev.rippleguard.audit.application.EventEnvelope;
 import dev.rippleguard.audit.application.TimelineService;
@@ -65,6 +66,7 @@ class AuditIngestionServiceIntegrationTest {
         jdbc.update("delete from agent_run_audit");
         jdbc.update("delete from audit_event");
         jdbc.update("delete from audit_event_quarantine");
+        jdbc.update("delete from pending_causation_event");
         jdbc.update("delete from inbox_event");
     }
 
@@ -395,9 +397,13 @@ class AuditIngestionServiceIntegrationTest {
 
     @Test
     void phase2ValidatedEventCreatesAgentRunAttemptTimelineAndApi() throws Exception {
+        UUID requestEventId = UUID.fromString("10000000-0000-4000-8000-000000002200");
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/agent.evaluation.requested.v1--phase2.json"));
         boolean ingested = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
 
         assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select causation_id from audit_event where event_type = ?",
+                UUID.class, "governance.agent-result.validated.v1")).isEqualTo(requestEventId);
         assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("select count(*) from agent_attempt_audit", Long.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("select validation_outcome from agent_run_audit", String.class))
@@ -405,7 +411,7 @@ class AuditIngestionServiceIntegrationTest {
         assertThat(jdbc.queryForObject("select attempt_count from agent_run_audit", Integer.class)).isEqualTo(1);
         var timeline = timeline("case-2001");
         assertThat(timeline.events()).extracting("eventType")
-                .contains("governance.agent-result.validated.v1");
+                .containsExactly("agent.evaluation.requested.v1", "governance.agent-result.validated.v1");
         assertThat(timeline.warnings()).doesNotContain("INVALID_REFERENCE");
 
         mvc.perform(get("/api/v1/agent-runs/{agentRunId}", "60000000-0000-4000-8000-000000002001"))
@@ -423,6 +429,7 @@ class AuditIngestionServiceIntegrationTest {
 
     @Test
     void phase2RejectedEventKeepsOutcomeDistinctFromAuditIngestionStatus() {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/agent.evaluation.requested.v1--phase2.json"));
         boolean ingested = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1--rejected.json"));
 
         assertThat(ingested).isTrue();
@@ -448,9 +455,45 @@ class AuditIngestionServiceIntegrationTest {
     }
 
     @Test
-    void phase2BrokenCausationIsQuarantinedWithoutProjection() {
+    void phase2MissingPredecessorIsStoredAsPendingWithoutProjection() {
         boolean ingested = ingestion.tryIngestRaw(contractFixture(
                 "examples/invalid/events/v1.0.0/governance.agent-result.validated.v1--broken-causation.json"));
+
+        assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from audit_event", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from audit_event_quarantine", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select status from pending_causation_event", String.class))
+                .isEqualTo("PENDING_CAUSATION");
+    }
+
+    @Test
+    void phase2AgentRunIdCausationIsQuarantinedWithoutProjection() throws Exception {
+        String event = mutatedFixture(
+                "examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json",
+                "causationId",
+                "60000000-0000-4000-8000-000000002001"
+        );
+
+        boolean ingested = ingestion.tryIngestRaw(event);
+
+        assertThat(ingested).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
+                .isEqualTo("BROKEN_CAUSATION");
+        assertThat(jdbc.queryForObject("select causation_id from audit_event_quarantine", UUID.class))
+                .isEqualTo(UUID.fromString("60000000-0000-4000-8000-000000002001"));
+    }
+
+    @Test
+    void phase2SelfCausationIsQuarantinedWithoutProjection() throws Exception {
+        String event = mutatedFixture(
+                "examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json",
+                "causationId",
+                "10000000-0000-4000-8000-000000002201"
+        );
+
+        boolean ingested = ingestion.tryIngestRaw(event);
 
         assertThat(ingested).isTrue();
         assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isZero();
@@ -459,7 +502,79 @@ class AuditIngestionServiceIntegrationTest {
     }
 
     @Test
+    void phase2OutOfOrderValidationIsResolvedWhenRequestArrives() {
+        boolean pending = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
+
+        assertThat(pending).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select status from pending_causation_event", String.class))
+                .isEqualTo("PENDING_CAUSATION");
+
+        boolean request = ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/agent.evaluation.requested.v1--phase2.json"));
+
+        assertThat(request).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select status from pending_causation_event", String.class))
+                .isEqualTo("RESOLVED");
+        assertThat(timeline("case-2001").events()).extracting("eventType")
+                .containsExactly("agent.evaluation.requested.v1", "governance.agent-result.validated.v1");
+    }
+
+    @Test
+    void phase2PendingValidationExpiresToBrokenCausationQuarantine() {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
+        jdbc.update("update pending_causation_event set expires_at = ?", java.sql.Timestamp.from(Instant.EPOCH));
+
+        ingestion.reconcilePendingCausation();
+
+        assertThat(jdbc.queryForObject("select status from pending_causation_event", String.class))
+                .isEqualTo("EXPIRED");
+        assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
+                .isEqualTo("BROKEN_CAUSATION");
+        assertThat(jdbc.queryForObject("select count(*) from audit_event", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isZero();
+    }
+
+    @Test
+    void phase2DuplicateRequestEventIsNotStoredTwice() {
+        EventEnvelope request = phase2RequestEvent();
+
+        ingestion.ingest(request);
+        ingestion.ingest(request);
+
+        assertThat(auditEvents.count()).isEqualTo(1);
+        assertThat(inbox.findById(request.eventId()).orElseThrow().getDuplicateCount()).isEqualTo(1);
+    }
+
+    @Test
+    void phase2DuplicateValidationEventIsNotStoredTwiceAndProjectionRemainsSingle() {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/agent.evaluation.requested.v1--phase2.json"));
+        String event = contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json");
+
+        ingestion.tryIngestRaw(event);
+        ingestion.tryIngestRaw(event);
+
+        UUID validationEventId = UUID.fromString("10000000-0000-4000-8000-000000002201");
+        assertThat(auditEvents.count()).isEqualTo(2);
+        assertThat(inbox.findById(validationEventId).orElseThrow().getDuplicateCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from agent_attempt_audit", Long.class)).isEqualTo(1);
+    }
+
+    @Test
+    void phase2QuarantinedValidationEventIsNotVisibleInTimeline() {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/agent.evaluation.requested.v1--phase2.json"));
+
+        ingestion.tryIngestRaw(contractFixture(
+                "examples/invalid/events/v1.0.0/governance.agent-result.validated.v1--broken-causation.json"));
+
+        assertThat(timeline("case-2001").events()).extracting("eventType")
+                .containsExactly("agent.evaluation.requested.v1");
+    }
+
+    @Test
     void phase2ConflictingAgentRunIsQuarantinedWithoutOverwritingProjection() {
+        ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/agent.evaluation.requested.v1--phase2.json"));
         ingestion.tryIngestRaw(contractFixture("examples/valid/events/v1.0.0/governance.agent-result.validated.v1.json"));
 
         boolean ingested = ingestion.tryIngestRaw(contractFixture(
@@ -471,7 +586,7 @@ class AuditIngestionServiceIntegrationTest {
                 .isEqualTo("VALIDATED");
         assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
                 .isEqualTo("DUPLICATE_AGENT_RUN_CONFLICT");
-        assertThat(auditEvents.count()).isEqualTo(1);
+        assertThat(auditEvents.count()).isEqualTo(2);
     }
 
     @Test
@@ -592,6 +707,31 @@ class AuditIngestionServiceIntegrationTest {
         );
     }
 
+    private EventEnvelope phase2RequestEvent() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000002001");
+        UUID evaluationRunId = UUID.fromString("30000000-0000-4000-8000-000000002001");
+        UUID agentRunId = UUID.fromString("60000000-0000-4000-8000-000000002001");
+        return new EventEnvelope(
+                UUID.fromString("10000000-0000-4000-8000-000000002200"),
+                "agent.evaluation.requested.v1",
+                "1.1.0",
+                Instant.parse("2026-07-21T01:10:00Z"),
+                "governance-service",
+                applicationId,
+                "case-2001",
+                evaluationRunId,
+                applicationId.toString(),
+                null,
+                objectMapper.valueToTree(Map.of(
+                        "evaluationRunId", evaluationRunId.toString(),
+                        "decisionCaseId", "case-2001",
+                        "inputSnapshotVersion", "snapshot-v1",
+                        "executionPlanVersion", "phase2-agent-v1",
+                        "evaluationMode", "AGENT"
+                ))
+        );
+    }
+
     private String producer(String eventType) {
         return eventType.startsWith("governance.") || eventType.startsWith("agent.")
                 || eventType.equals("loan.decision.commanded.v1") ? "governance-service" : "loan-service";
@@ -607,5 +747,11 @@ class AuditIngestionServiceIntegrationTest {
         } catch (java.io.IOException exception) {
             throw new UncheckedIOException("Failed to read contract fixture: " + resourcePath, exception);
         }
+    }
+
+    private String mutatedFixture(String relativePath, String field, String value) throws Exception {
+        ObjectNode node = (ObjectNode) objectMapper.readTree(contractFixture(relativePath));
+        node.put(field, value);
+        return objectMapper.writeValueAsString(node);
     }
 }

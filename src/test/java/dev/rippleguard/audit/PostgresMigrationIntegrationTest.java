@@ -64,6 +64,7 @@ class PostgresMigrationIntegrationTest {
         jdbc.update("delete from agent_attempt_audit");
         jdbc.update("delete from agent_run_audit");
         jdbc.update("delete from audit_event_quarantine");
+        jdbc.update("delete from pending_causation_event");
         jdbc.update("delete from audit_event");
         jdbc.update("delete from inbox_event");
     }
@@ -152,6 +153,7 @@ class PostgresMigrationIntegrationTest {
     @Test
     void concurrentPhase2SameEventIdDifferentPayloadPrefersPayloadConflict() throws Exception {
         UUID eventId = UUID.randomUUID();
+        ingestion.ingest(phase2RequestEvent());
         EventEnvelope first = phase2ValidatedEvent(
                 eventId,
                 "VALIDATED",
@@ -177,8 +179,8 @@ class PostgresMigrationIntegrationTest {
         );
 
         assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
-        assertThat(jdbc.queryForObject("select count(*) from audit_event", Long.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("select count(*) from inbox_event", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from audit_event", Long.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from inbox_event", Long.class)).isEqualTo(2);
         assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("select count(*) from audit_event_quarantine", Long.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("select reason_code from audit_event_quarantine", String.class))
@@ -187,6 +189,74 @@ class PostgresMigrationIntegrationTest {
                 Integer.class, eventId)).isZero();
         assertThat(jdbc.queryForObject("select conflict_count from inbox_event where event_id = ?",
                 Integer.class, eventId)).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentPendingResolutionAndPredecessorIngestionResolvesValidationOnce() throws Exception {
+        UUID validationEventId = UUID.fromString("10000000-0000-4000-8000-000000002201");
+        ingestion.ingest(phase2ValidatedEvent(
+                validationEventId,
+                "VALIDATED",
+                1,
+                "sha256:14894f822eb1e00eada33940c2160598c8bde2865e1ddfb2959092a175e4c2fa"
+        ));
+        jdbc.update("update pending_causation_event set next_attempt_at = ?", java.sql.Timestamp.from(Instant.EPOCH));
+
+        var results = runConcurrently(
+                () -> {
+                    ingestion.ingest(phase2RequestEvent());
+                    return null;
+                },
+                () -> {
+                    ingestion.reconcilePendingCausation();
+                    return null;
+                }
+        );
+
+        assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
+        jdbc.update("update pending_causation_event set next_attempt_at = ? where status = 'PENDING_CAUSATION'",
+                java.sql.Timestamp.from(Instant.EPOCH));
+        ingestion.reconcilePendingCausation();
+        assertThat(countAuditEvents("agent.evaluation.requested.v1")).isEqualTo(1);
+        assertThat(countAuditEvents("governance.agent-result.validated.v1")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from agent_attempt_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select status from pending_causation_event where event_id = ?",
+                String.class, validationEventId)).isEqualTo("RESOLVED");
+        assertThat(jdbc.queryForObject("select count(*) from audit_event_quarantine", Long.class)).isZero();
+    }
+
+    @Test
+    void concurrentPendingSchedulersClaimValidationOnce() throws Exception {
+        UUID validationEventId = UUID.fromString("10000000-0000-4000-8000-000000002202");
+        ingestion.ingest(phase2ValidatedEvent(
+                validationEventId,
+                "VALIDATED",
+                1,
+                "sha256:14894f822eb1e00eada33940c2160598c8bde2865e1ddfb2959092a175e4c2fa"
+        ));
+        insertAcceptedPhase2RequestEvent();
+        jdbc.update("update pending_causation_event set next_attempt_at = ?", java.sql.Timestamp.from(Instant.EPOCH));
+
+        var results = runConcurrently(
+                () -> {
+                    ingestion.reconcilePendingCausation();
+                    return null;
+                },
+                () -> {
+                    ingestion.reconcilePendingCausation();
+                    return null;
+                }
+        );
+
+        assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
+        assertThat(countAuditEvents("agent.evaluation.requested.v1")).isEqualTo(1);
+        assertThat(countAuditEvents("governance.agent-result.validated.v1")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from agent_run_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from agent_attempt_audit", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select status from pending_causation_event where event_id = ?",
+                String.class, validationEventId)).isEqualTo("RESOLVED");
+        assertThat(jdbc.queryForObject("select count(*) from audit_event_quarantine", Long.class)).isZero();
     }
 
     private EventEnvelope submittedEvent(UUID eventId, UUID applicationId, String applicantId) {
@@ -228,7 +298,7 @@ class PostgresMigrationIntegrationTest {
                 "case-2001",
                 evaluationRunId,
                 applicationId.toString(),
-                agentRunId,
+                UUID.fromString("10000000-0000-4000-8000-000000002200"),
                 objectMapper.valueToTree(Map.of(
                         "decisionCaseId", "case-2001",
                         "evaluationRunId", evaluationRunId.toString(),
@@ -242,6 +312,58 @@ class PostgresMigrationIntegrationTest {
                         "validatedAt", "2026-07-21T10:10:04+09:00"
                 ))
         );
+    }
+
+    private EventEnvelope phase2RequestEvent() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000002001");
+        UUID evaluationRunId = UUID.fromString("30000000-0000-4000-8000-000000002001");
+        return new EventEnvelope(
+                UUID.fromString("10000000-0000-4000-8000-000000002200"),
+                "agent.evaluation.requested.v1",
+                "1.1.0",
+                Instant.parse("2026-07-21T01:10:00Z"),
+                "governance-service",
+                applicationId,
+                "case-2001",
+                evaluationRunId,
+                applicationId.toString(),
+                null,
+                objectMapper.valueToTree(Map.of(
+                        "evaluationRunId", evaluationRunId.toString(),
+                        "decisionCaseId", "case-2001",
+                        "inputSnapshotVersion", "snapshot-v1",
+                        "executionPlanVersion", "phase2-agent-v1",
+                        "evaluationMode", "AGENT"
+                ))
+        );
+    }
+
+    private void insertAcceptedPhase2RequestEvent() {
+        EventEnvelope event = phase2RequestEvent();
+        var ingestedAt = java.sql.Timestamp.from(Instant.parse("2026-07-21T01:10:01Z"));
+        String payloadHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        jdbc.update("""
+                        insert into inbox_event (
+                            event_id, event_type, application_id, payload_hash,
+                            duplicate_count, first_seen_at, last_seen_at, conflict_count
+                        ) values (?, ?, ?, ?, 0, ?, ?, 0)
+                        """,
+                event.eventId(), event.eventType(), event.applicationId(), payloadHash, ingestedAt, ingestedAt);
+        jdbc.update("""
+                        insert into audit_event (
+                            event_id, event_type, schema_version, occurred_at, producer,
+                            application_id, case_id, evaluation_run_id, correlation_id, causation_id,
+                            sanitized_payload, payload_hash, unknown_version, ingested_at
+                        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false, ?)
+                        """,
+                event.eventId(), event.eventType(), event.schemaVersion(),
+                java.sql.Timestamp.from(event.occurredAt()), event.producer(),
+                event.applicationId(), event.caseId(), event.evaluationRunId(), event.correlationId(),
+                event.causationId(), "{}", payloadHash, ingestedAt);
+    }
+
+    private long countAuditEvents(String eventType) {
+        return jdbc.queryForObject("select count(*) from audit_event where event_type = ?", Long.class, eventType);
     }
 
     private List<Object> runConcurrently(ThrowingSupplier<?> first, ThrowingSupplier<?> second) throws Exception {
